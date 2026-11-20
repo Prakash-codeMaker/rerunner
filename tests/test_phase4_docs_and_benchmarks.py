@@ -65,3 +65,21 @@ def test_release_please_configs_match_package_version() -> None:
 
     assert manifest["."] == server["version"]
     assert config["packages"]["."]["package-name"] == "rerunner"
+def test_benchmark_json_report_contains_latency_and_compression_metrics(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "benchmarks" / "generate_report.py"
+    spec = importlib.util.spec_from_file_location("generate_report_json", script_path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    import sys
+
+    sys.modules["generate_report_json"] = mod
+    spec.loader.exec_module(mod)
+    latency = mod.LatencySummary(3, 5.0, 1.0, 0.1, 10.0, 3090, 0.02)
+    compression = [mod.CompressionRow("Gzip", "cassette.jsonl.gz", 2.0, 50.0, 1.0, 0.5)]
+    path = tmp_path / "bench.json"
+    mod.write_json_report(path, latency, compression)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["latency"]["speedup"] == 10.0
+    assert data["latency"]["tokens_saved"] == 3090
+    assert data["compression"][0]["ratio_pct"] == 50.0
+
