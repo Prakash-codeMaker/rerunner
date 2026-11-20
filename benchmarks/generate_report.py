@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import json
 import tempfile
 import time
 from dataclasses import dataclass
@@ -42,6 +43,33 @@ class LatencySummary:
     speedup: float
     tokens_saved: int
     cost_saved_usd: float
+
+def write_json_report(path: Path, latency: LatencySummary, compression: list[CompressionRow]) -> None:
+    """Write the benchmark metrics in a stable, machine-readable shape."""
+    payload = {
+        "latency": {
+            "steps": latency.steps,
+            "simulated_step_ms": latency.simulated_step_ms,
+            "live_total_s": latency.live_total_s,
+            "replay_total_s": latency.replay_total_s,
+            "speedup": latency.speedup,
+            "tokens_saved": latency.tokens_saved,
+            "cost_saved_usd": latency.cost_saved_usd,
+        },
+        "compression": [
+            {
+                "label": row.label,
+                "filename": row.filename,
+                "size_kb": row.size_kb,
+                "ratio_pct": row.ratio_pct,
+                "write_ms": row.write_ms,
+                "read_ms": row.read_ms,
+            }
+            for row in compression
+        ],
+    }
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
 
 
 def _build_synthetic_entries(num_turns: int = 200) -> list[CassetteEntry]:
@@ -334,6 +362,7 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=20, help="Number of turns for latency bench.")
     parser.add_argument("--step-ms", type=float, default=150.0, help="Simulated RTT ms per turn.")
     parser.add_argument("--turns", type=int, default=200, help="Number of turns for compression.")
+    parser.add_argument("--json", type=Path, metavar="PATH", help="Also write machine-readable benchmark metrics to PATH.")
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parent.parent
@@ -343,6 +372,8 @@ def main() -> None:
         simulated_step_ms=args.step_ms,
         compression_turns=args.turns,
     )
+    if args.json is not None:
+        write_json_report(args.json, latency, compression)
     print(
         f"Generated benchmarks: {latency.speedup:.1f}x speedup "
         f"({latency.live_total_s:.2f}s -> {latency.replay_total_s:.3f}s), "
