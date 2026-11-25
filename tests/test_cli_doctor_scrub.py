@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+import uuid
 
 import pytest
 from typer.main import get_command
@@ -14,6 +15,7 @@ from rerunner.cassette import Cassette
 from rerunner.cli import app
 from rerunner.integrity import verify_cassette_integrity
 from rerunner.models import CassetteEntry, RecordedRequest, RecordedResponse
+from rerunner.sanitizer import _is_luhn_valid
 
 runner = CliRunner(env={"COLUMNS": "200"})
 
@@ -210,6 +212,123 @@ def test_cli_scrub_removes_secrets_and_rechains_integrity(tmp_path: Path) -> Non
     # Cryptographic integrity
     is_valid, err = verify_cassette_integrity(scrubbed.entries)
     assert is_valid, err
+
+
+
+
+def test_cli_scrub_pseudonymizes_pii_deterministically(tmp_path: Path) -> None:
+    source = tmp_path / "pseudonymize_input.jsonl"
+    first_output = tmp_path / "pseudonymized_first.jsonl"
+    second_output = tmp_path / "pseudonymized_second.jsonl"
+    email = "alice.smith@example.org"
+    original_uuid = "123e4567-e89b-12d3-a456-426614174000"
+    original_ssn = "123-45-6789"
+    original_card = "4111111111111111"
+    secret = "sk-proj-1234567890abcdef1234567890abcdef12345"
+
+    cassette = Cassette(source)
+    cassette.append(
+        CassetteEntry(
+            step=1,
+            entry_type="http",
+            request=RecordedRequest(
+                method="POST",
+                url=f"https://api.example.org/run?contact={email}&key=private-key-value",
+                headers={
+                    "authorization": f"Bearer {secret}",
+                    "x-api-key": "another-private-key",
+                    "x-contact-email": email,
+                },
+                body=json.dumps({
+                    "email": email,
+                    "uuid": original_uuid,
+                    "ssn": original_ssn,
+                    "card": original_card,
+                    "malformed_card": "4111 1111 1111 1112",
+                    "phone": "123-456-7890",
+                    "api_key": secret,
+                }),
+            ),
+            response=RecordedResponse(
+                status_code=200,
+                headers={"content-type": "text/event-stream"},
+                body=json.dumps({"reply": f"hello {email}"}),
+                chunks=[f"data: hello {email[:12]}", f"{email[12:]}\n\n", "data: [DONE]\n\n"],
+                chunk_delays_ms=[0.0, 1.0, 1.0],
+                is_streaming=True,
+            ),
+        )
+    )
+    cassette.append(
+        CassetteEntry(
+            step=2,
+            entry_type="tool",
+            side_effect_name="save_contact",
+            side_effect_args=[{"email": email, "uuid": original_uuid}],
+            side_effect_kwargs={"records": [{"ssn": original_ssn, "card": original_card}]},
+            side_effect_result={"owner": email, "history": [{"contact": email}]},
+        )
+    )
+    cassette.save()
+
+    seed = "stable-pseudonym-seed"
+    first = runner.invoke(
+        app,
+        ["scrub", str(source), "--output", str(first_output), "--pseudonymize", "--seed", seed],
+    )
+    assert first.exit_code == 0, first.output
+    second = runner.invoke(
+        app,
+        ["scrub", str(source), "--output", str(second_output), "--pseudonymize", "--seed", seed],
+    )
+    assert second.exit_code == 0, second.output
+
+    scrubbed = Cassette.load(first_output)
+    repeated = Cassette.load(second_output)
+    request = scrubbed.entries[0].request
+    response = scrubbed.entries[0].response
+    assert request is not None and response is not None
+    body = json.loads(request.body)
+    repeated_body = json.loads(repeated.entries[0].request.body)
+
+    synthetic_email = body["email"]
+    assert re.fullmatch(r"user_[0-9a-f]{10}@example\.test", synthetic_email)
+    assert synthetic_email == repeated_body["email"]
+    assert email not in request.url
+    assert "%40example.test" in request.url
+    assert request.headers["authorization"] == "[REDACTED]"
+    assert request.headers["x-api-key"] == "[REDACTED]"
+    assert request.headers["x-contact-email"].endswith("@example.test")
+    assert body["uuid"] != original_uuid
+    assert str(uuid.UUID(body["uuid"])) == body["uuid"]
+    assert body["uuid"] == repeated_body["uuid"]
+    assert body["ssn"].startswith("900-")
+    assert body["ssn"] == repeated_body["ssn"]
+    assert body["card"].startswith("400000")
+    assert _is_luhn_valid(body["card"])
+    assert body["card"] == repeated_body["card"]
+    assert body["malformed_card"] == "[REDACTED_CREDIT_CARD]"
+    assert body["phone"] == "[REDACTED_PHONE]"
+    assert body["api_key"] == "[REDACTED_OPENAI_PROJECT_KEY]"
+
+    # Streaming chunks and nested tool lists must use the same deterministic mapping.
+    assert email not in "".join(response.chunks)
+    assert "@example.test" in "".join(response.chunks)
+    tool_args = scrubbed.entries[1].side_effect_args
+    assert isinstance(tool_args, list) and tool_args[0]["email"].endswith("@example.test")
+    assert tool_args[0]["uuid"] == body["uuid"]
+    tool_kwargs = scrubbed.entries[1].side_effect_kwargs
+    assert tool_kwargs["records"][0]["ssn"].startswith("900-")
+    assert tool_kwargs["records"][0]["card"].startswith("400000")
+    assert scrubbed.entries[1].side_effect_result["owner"].endswith("@example.test")
+
+    verified = runner.invoke(app, ["verify", str(first_output), "--strict"])
+    assert verified.exit_code == 0, verified.output
+    assert "Security scan passed" in verified.output
+
+    missing_mode = runner.invoke(app, ["scrub", str(source), "--seed", seed])
+    assert missing_mode.exit_code != 0
+    assert "--seed can only be used with --pseudonymize" in missing_mode.output
 
 
 def test_cli_scrub_redacts_values_split_across_stream_chunks(tmp_path: Path) -> None:
