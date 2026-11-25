@@ -183,14 +183,16 @@ def sanitize_string(
     # Redact credit card numbers (delimiters or valid Luhn)
     def _card_replacer(match: re.Match[str]) -> str:
         matched = match.group(0)
+        digits = re.sub(r"\\D", "", matched)
+        if pseudonymizer is not None and digits.startswith("400000") and _is_luhn_valid(digits):
+            return matched
         if " " in matched or "-" in matched:
             return "[REDACTED_CREDIT_CARD]"
         if _is_luhn_valid(matched):
             return "[REDACTED_CREDIT_CARD]"
         return matched
 
-    if pseudonymizer is None:
-        sanitized = _CARD_REGEX.sub(_card_replacer, sanitized)
+    sanitized = _CARD_REGEX.sub(_card_replacer, sanitized)
 
     # Redact IP addresses without mangling semver strings like 1.2.3.4
     def _ip_replacer(match: re.Match[str]) -> str:
