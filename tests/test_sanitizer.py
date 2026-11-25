@@ -580,6 +580,29 @@ def test_sether_redactor_validation_and_redact(monkeypatch: pytest.MonkeyPatch) 
     assert "[REDACTED_PHONE]" in redacted
 
 
+def test_find_sensitive_leaks_scans_past_synthetic_pii() -> None:
+    pseudonymizer = Pseudonymizer(seed="leak-scanner-regression")
+    synthetic_email = pseudonymizer.pseudonymize_email("synthetic@source.example")
+    synthetic_ssn = pseudonymizer.pseudonymize_ssn("123-45-6789")
+    synthetic_card = pseudonymizer.pseudonymize_credit_card("4111-1111-1111-1111")
+
+    text = " ".join(
+        [
+            synthetic_email,
+            "real@example.org",
+            synthetic_ssn,
+            "123-45-6789",
+            synthetic_card,
+            "4111-1111-1111-1111",
+        ]
+    )
+    leaks = find_sensitive_leaks(text)
+
+    assert any("REDACTED_EMAIL" in leak for leak in leaks)
+    assert any("REDACTED_SSN" in leak for leak in leaks)
+    assert any("REDACTED_CREDIT_CARD" in leak for leak in leaks)
+
+
 def test_pseudonymizer_comprehensive(monkeypatch: pytest.MonkeyPatch) -> None:
     p_default = Pseudonymizer()
     p_bytes = Pseudonymizer(seed=b"custom-bytes-seed")

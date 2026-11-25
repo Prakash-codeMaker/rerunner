@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Features
+
+* **cli:** add `--pseudonymize` and optional `--seed` to `rerunner scrub`, keeping supported PII format-valid while credentials and unsupported PII remain redacted ([#98](https://github.com/aakash1552005/rerunner/issues/98)).
+
+
 ## [0.3.5](https://github.com/aakash1552005/rerunner/compare/v0.3.4...v0.3.5) (2026-11-20)
 
 

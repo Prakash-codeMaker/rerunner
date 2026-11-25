@@ -470,6 +470,12 @@ rerunner doctor session.jsonl session.jsonl.zst session.jsonl.gz
 # Scrub secrets and re-sign cryptographic SHA-256 hash chains across existing cassettes
 rerunner scrub session.jsonl
 
+# Replace supported PII with deterministic, format-valid synthetic values
+rerunner scrub session.jsonl --pseudonymize
+
+# Keep the same synthetic identities across separate scrub runs
+rerunner scrub session.jsonl --pseudonymize --seed "$RERUNNER_PSEUDONYM_SEED"
+
 # Launch interactive terminal flight deck to visually inspect multi-turn agent steps
 rerunner tui session.jsonl
 
@@ -508,6 +514,13 @@ rerunner merge shard1.jsonl shard2.jsonl -o combined.jsonl
 rerunner keygen -o .keys
 rerunner sign session.jsonl --private-key .keys/rerunner_ed25519.key
 ```
+
+With `--pseudonymize`, supported emails, UUIDs, SSNs, and credit-card values are replaced with
+deterministic synthetic equivalents that retain their expected format. API credentials, phone
+numbers, IP addresses, and unsupported patterns remain redacted. Use the same private seed
+across related cassettes when you need consistent identities; Rerunner reads
+`RERUNNER_PSEUDONYM_SEED` by default, while `--seed` overrides it for one command and requires
+`--pseudonymize`.
 
 ### Pre-commit cassette security audit
 
