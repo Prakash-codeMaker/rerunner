@@ -470,6 +470,10 @@ rerunner doctor session.jsonl session.jsonl.zst session.jsonl.gz
 # Scrub secrets and re-sign cryptographic SHA-256 hash chains across existing cassettes
 rerunner scrub session.jsonl
 
+# Replace supported PII with deterministic, schema-valid synthetic identifiers
+# API keys and other secrets remain redacted; use the same seed to reproduce the mapping
+rerunner scrub session.jsonl --pseudonymize --seed local-test
+
 # Launch interactive terminal flight deck to visually inspect multi-turn agent steps
 rerunner tui session.jsonl
 
