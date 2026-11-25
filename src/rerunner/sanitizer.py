@@ -173,11 +173,12 @@ def sanitize_string(
     text: str,
     custom_patterns: list[tuple[re.Pattern[str], str]] | None = None,
     pii_redactor: PiiRedactor | None = None,
+    pseudonymizer: Pseudonymizer | None = None,
 ) -> str:
-    """Scan and scrub sensitive API tokens and PII from arbitrary strings."""
+    """Scrub secrets and PII, or replace supported PII with deterministic synthetic values."""
     if not text:
         return text
-    sanitized = text
+    sanitized = pseudonymizer.pseudonymize_string(text) if pseudonymizer is not None else text
 
     # Redact credit card numbers (delimiters or valid Luhn)
     def _card_replacer(match: re.Match[str]) -> str:
@@ -188,7 +189,8 @@ def sanitize_string(
             return "[REDACTED_CREDIT_CARD]"
         return matched
 
-    sanitized = _CARD_REGEX.sub(_card_replacer, sanitized)
+    if pseudonymizer is None:
+        sanitized = _CARD_REGEX.sub(_card_replacer, sanitized)
 
     # Redact IP addresses without mangling semver strings like 1.2.3.4
     def _ip_replacer(match: re.Match[str]) -> str:
@@ -201,6 +203,8 @@ def sanitize_string(
 
     # Apply default secret & PII patterns
     for pattern, replacement in SECRET_PATTERNS:
+        if pseudonymizer is not None and replacement in {"[REDACTED_EMAIL]", "[REDACTED_SSN]"}:
+            continue
         sanitized = pattern.sub(replacement, sanitized)
 
     # Apply custom user patterns and environment variable patterns
@@ -225,6 +229,7 @@ def sanitize_url(
     url: str,
     custom_patterns: list[tuple[re.Pattern[str], str]] | None = None,
     pii_redactor: PiiRedactor | None = None,
+    pseudonymizer: Pseudonymizer | None = None,
 ) -> str:
     """Sanitize secrets from URL query parameters (e.g. ?key=AIza...) and path components."""
     if not url:
@@ -232,7 +237,7 @@ def sanitize_url(
 
     parts = urlsplit(url)
     if not parts.query:
-        return sanitize_string(url, custom_patterns=custom_patterns, pii_redactor=pii_redactor)
+        return sanitize_string(url, custom_patterns=custom_patterns, pii_redactor=pii_redactor, pseudonymizer=pseudonymizer)
 
     query_params = parse_qsl(parts.query, keep_blank_values=True)
     sanitized_params: list[tuple[str, str]] = []
@@ -243,13 +248,13 @@ def sanitize_url(
             sanitized_params.append((k, "[REDACTED]"))
         else:
             sanitized_val = sanitize_string(
-                v, custom_patterns=custom_patterns, pii_redactor=pii_redactor
+                v, custom_patterns=custom_patterns, pii_redactor=pii_redactor, pseudonymizer=pseudonymizer
             )
             sanitized_params.append((k, sanitized_val))
 
     clean_query = urlencode(sanitized_params)
     clean_path = sanitize_string(
-        parts.path, custom_patterns=custom_patterns, pii_redactor=pii_redactor
+        parts.path, custom_patterns=custom_patterns, pii_redactor=pii_redactor, pseudonymizer=pseudonymizer
     )
 
     return urlunsplit((parts.scheme, parts.netloc, clean_path, clean_query, parts.fragment))
@@ -259,6 +264,7 @@ def sanitize_headers(
     headers: dict[str, str],
     custom_patterns: list[tuple[re.Pattern[str], str]] | None = None,
     pii_redactor: PiiRedactor | None = None,
+    pseudonymizer: Pseudonymizer | None = None,
 ) -> dict[str, str]:
     """Scrub sensitive HTTP headers before writing to cassette."""
     sanitized: dict[str, str] = {}
@@ -268,7 +274,7 @@ def sanitize_headers(
             sanitized[k_lower] = "[REDACTED]"
         else:
             sanitized[k_lower] = sanitize_string(
-                value, custom_patterns=custom_patterns, pii_redactor=pii_redactor
+                value, custom_patterns=custom_patterns, pii_redactor=pii_redactor, pseudonymizer=pseudonymizer
             )
     return sanitized
 
@@ -277,6 +283,7 @@ def sanitize_payload(
     data: Any,
     custom_patterns: list[tuple[re.Pattern[str], str]] | None = None,
     pii_redactor: PiiRedactor | None = None,
+    pseudonymizer: Pseudonymizer | None = None,
 ) -> Any:
     """Recursively sanitize dicts, lists, and strings for safe storage without mutating numbers or booleans."""
     if hasattr(data, "model_dump") and callable(data.model_dump):
@@ -285,21 +292,22 @@ def sanitize_payload(
                 data.model_dump(mode="python"),
                 custom_patterns=custom_patterns,
                 pii_redactor=pii_redactor,
+                pseudonymizer=pseudonymizer,
             )
         except Exception:  # nosec B110
             pass
     if dataclasses.is_dataclass(data) and not isinstance(data, type):
         try:
             return sanitize_payload(
-                dataclasses.asdict(data), custom_patterns=custom_patterns, pii_redactor=pii_redactor
+                dataclasses.asdict(data), custom_patterns=custom_patterns, pii_redactor=pii_redactor, pseudonymizer=pseudonymizer
             )
         except Exception:  # nosec B110
             pass
     if isinstance(data, str):
-        return sanitize_string(data, custom_patterns=custom_patterns, pii_redactor=pii_redactor)
+        return sanitize_string(data, custom_patterns=custom_patterns, pii_redactor=pii_redactor, pseudonymizer=pseudonymizer)
     if isinstance(data, dict):
         cleaned_keys = [
-            sanitize_string(str(k), custom_patterns=custom_patterns, pii_redactor=pii_redactor)
+            sanitize_string(str(k), custom_patterns=custom_patterns, pii_redactor=pii_redactor, pseudonymizer=pseudonymizer)
             if isinstance(k, str)
             else k
             for k in data
@@ -325,7 +333,7 @@ def sanitize_payload(
                 result[clean_k] = v
             else:
                 result[clean_k] = sanitize_payload(
-                    v, custom_patterns=custom_patterns, pii_redactor=pii_redactor
+                    v, custom_patterns=custom_patterns, pii_redactor=pii_redactor, pseudonymizer=pseudonymizer
                 )
         return result
     if isinstance(data, list):
@@ -345,6 +353,7 @@ def sanitize_body(
     body: str,
     custom_patterns: list[tuple[re.Pattern[str], str]] | None = None,
     pii_redactor: PiiRedactor | None = None,
+    pseudonymizer: Pseudonymizer | None = None,
 ) -> str:
     """Parse JSON bodies to safely redact string values while preserving numbers, booleans, and structure.
 
@@ -360,13 +369,18 @@ def sanitize_body(
         try:
             parsed = json.loads(trimmed)
             sanitized_data = sanitize_payload(
-                parsed, custom_patterns=custom_patterns, pii_redactor=pii_redactor
+                parsed, custom_patterns=custom_patterns, pii_redactor=pii_redactor, pseudonymizer=pseudonymizer
             )
             return json.dumps(sanitized_data, ensure_ascii=False)
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
 
-    return sanitize_string(body, custom_patterns=custom_patterns, pii_redactor=pii_redactor)
+    return sanitize_string(
+        body,
+        custom_patterns=custom_patterns,
+        pii_redactor=pii_redactor,
+        pseudonymizer=pseudonymizer,
+    )
 
 
 # How far settling looks back across a chunk boundary: literal characters kept in front of a
@@ -412,6 +426,7 @@ def sanitize_chunks(
     chunks: list[str],
     custom_patterns: list[tuple[re.Pattern[str], str]] | None = None,
     pii_redactor: PiiRedactor | None = None,
+    pseudonymizer: Pseudonymizer | None = None,
 ) -> list[str]:
     """Sanitize streamed chunks so a value split across chunk boundaries is still redacted.
 
@@ -432,11 +447,11 @@ def sanitize_chunks(
     within a small multiple of the stream instead of growing with its square.
     """
     cleaned = [
-        sanitize_string(chunk, custom_patterns=custom_patterns, pii_redactor=pii_redactor)
+        sanitize_string(chunk, custom_patterns=custom_patterns, pii_redactor=pii_redactor, pseudonymizer=pseudonymizer)
         for chunk in chunks
     ]
     joined = "".join(chunks)
-    target = sanitize_string(joined, custom_patterns=custom_patterns, pii_redactor=pii_redactor)
+    target = sanitize_string(joined, custom_patterns=custom_patterns, pii_redactor=pii_redactor, pseudonymizer=pseudonymizer)
     if "".join(cleaned) == target:
         return cleaned
 
@@ -479,7 +494,7 @@ def sanitize_chunks(
         else:
             window = joined[aligned - context : consumed]
             settled = sanitize_string(
-                window, custom_patterns=custom_patterns, pii_redactor=pii_redactor
+                window, custom_patterns=custom_patterns, pii_redactor=pii_redactor, pseudonymizer=pseudonymizer
             )
             base = aligned_start - context
             agreed = _common_prefix_length(settled, target[base : base + len(settled)])
@@ -529,9 +544,13 @@ def find_sensitive_leaks(
     for text in text_to_scan:
         for match in _CARD_REGEX.finditer(text):
             matched = match.group(0)
+            digits = re.sub(r"\D", "", matched)
+            synthetic = digits.startswith("400000") and _is_luhn_valid(digits)
             if (
-                " " in matched or "-" in matched or _is_luhn_valid(matched)
-            ) and not matched.startswith("[REDACTED"):
+                (" " in matched or "-" in matched or _is_luhn_valid(matched))
+                and not matched.startswith("[REDACTED")
+                and not synthetic
+            ):
                 leaks.append("Found unredacted pattern matching REDACTED_CREDIT_CARD")
 
         for match in _IP_REGEX.finditer(text):
@@ -543,7 +562,12 @@ def find_sensitive_leaks(
             search_match = pat.search(text)
             if search_match:
                 matched_val = search_match.group(0)
-                if not matched_val.startswith("[REDACTED"):
+                synthetic_email = (
+                    replacement == "[REDACTED_EMAIL]"
+                    and matched_val.lower().endswith("@example.test")
+                )
+                synthetic_ssn = replacement == "[REDACTED_SSN]" and matched_val.startswith("900-")
+                if not matched_val.startswith("[REDACTED") and not (synthetic_email or synthetic_ssn):
                     leaks.append(f"Found unredacted pattern matching {replacement.strip('[]')}")
 
     return list(dict.fromkeys(leaks))
