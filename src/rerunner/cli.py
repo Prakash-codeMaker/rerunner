@@ -38,6 +38,7 @@ from rerunner.reports import (
     generate_savings_markdown,
 )
 from rerunner.setup_wizard import configure_clients
+from rerunner.sanitizer import Pseudonymizer
 
 _extract_detailed_tokens_from_body = extract_detailed_tokens_from_body
 _extract_tokens_from_body = extract_tokens_from_body
@@ -650,13 +651,27 @@ def scrub(
         "--dry-run",
         help="Simulate scrubbing and report leaks without modifying the cassette file.",
     ),
+    pseudonymize: bool = typer.Option(
+        False,
+        "--pseudonymize",
+        help="Replace supported PII with deterministic synthetic values instead of placeholders.",
+    ),
+    seed: str | None = typer.Option(
+        None,
+        "--seed",
+        help="Seed for deterministic synthetic identifiers; requires --pseudonymize.",
+    ),
 ) -> None:
-    """Scan and scrub existing cassettes of leaked API keys and PII, re-signing the SHA-256 chain."""
+    """Scrub secrets and redact or pseudonymize PII, then re-sign the SHA-256 chain."""
+    if seed is not None and not pseudonymize:
+        raise typer.BadParameter("--seed can only be used with --pseudonymize")
+    pseudonymizer = Pseudonymizer(seed=seed) if pseudonymize else None
     try:
         report = scrub_cassette_file(
             cassette_path,
             output_path=output_path,
             dry_run=dry_run,
+            pseudonymizer=pseudonymizer,
         )
     except Exception as exc:
         console.print(f"[bold red]Error loading cassette:[/] {exc}")
