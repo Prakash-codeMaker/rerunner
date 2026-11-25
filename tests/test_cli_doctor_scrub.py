@@ -244,6 +244,7 @@ def test_cli_scrub_pseudonymizes_pii_deterministically(tmp_path: Path) -> None:
                     "uuid": original_uuid,
                     "ssn": original_ssn,
                     "card": original_card,
+                    "malformed_card": "4111 1111 1111 1112",
                     "phone": "123-456-7890",
                     "api_key": secret,
                 }),
@@ -306,6 +307,7 @@ def test_cli_scrub_pseudonymizes_pii_deterministically(tmp_path: Path) -> None:
     assert body["card"].startswith("400000")
     assert _is_luhn_valid(body["card"])
     assert body["card"] == repeated_body["card"]
+    assert body["malformed_card"] == "[REDACTED_CREDIT_CARD]"
     assert body["phone"] == "[REDACTED_PHONE]"
     assert body["api_key"] == "[REDACTED_OPENAI_PROJECT_KEY]"
 
