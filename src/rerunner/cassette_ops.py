@@ -124,7 +124,11 @@ def estimate_entry_cost_usd(
 
 
 def extract_detailed_tokens_from_body(body_str: str) -> dict[str, int]:
-    """Extract prompt, completion, total, and prompt-caching token counts from a JSON response body."""
+    """Extract token usage from JSON responses or Server-Sent Event streams.
+
+    Supports Chat Completions usage, Responses API `response.completed` events,
+    and provider usage nested under a `message` object (for example Anthropic).
+    """
     result = {
         "prompt": 0,
         "completion": 0,
@@ -135,39 +139,110 @@ def extract_detailed_tokens_from_body(body_str: str) -> dict[str, int]:
     }
     if not body_str:
         return result
+
+    def _token_count(value: Any) -> int:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return max(0, int(value))
+        return 0
+
+    payloads: list[dict[str, Any]] = []
     try:
-        data = json.loads(body_str)
-        if isinstance(data, dict):
-            usage = data.get("usage")
-            if isinstance(usage, dict):
-                prompt = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
-                comp = usage.get("completion_tokens") or usage.get("output_tokens") or 0
-                cache_creation = (
-                    usage.get("cache_creation_input_tokens")
-                    or usage.get("cache_creation_tokens")
-                    or 0
-                )
-                cache_read = (
-                    usage.get("cache_read_input_tokens") or usage.get("cache_read_tokens") or 0
-                )
-                reasoning = 0
-                if isinstance(usage.get("completion_tokens_details"), dict):
-                    reasoning = usage["completion_tokens_details"].get("reasoning_tokens") or 0
-                total = usage.get("total_tokens")
-                if total is None or not isinstance(total, int):
-                    total = int(prompt) + int(comp) + int(cache_creation) + int(cache_read)
-                result["prompt"] = int(prompt) if isinstance(prompt, (int, float)) else 0
-                result["completion"] = int(comp) if isinstance(comp, (int, float)) else 0
-                result["cache_creation_input_tokens"] = (
-                    int(cache_creation) if isinstance(cache_creation, (int, float)) else 0
-                )
-                result["cache_read_input_tokens"] = (
-                    int(cache_read) if isinstance(cache_read, (int, float)) else 0
-                )
-                result["reasoning"] = int(reasoning) if isinstance(reasoning, (int, float)) else 0
-                result["total"] = int(total)
-    except (json.JSONDecodeError, TypeError, ValueError, KeyError):
-        pass
+        parsed = json.loads(body_str)
+        if isinstance(parsed, dict):
+            payloads.append(parsed)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        # Streaming responses contain one JSON payload per SSE data field.
+        for line in body_str.splitlines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            event_data = line[5:].strip()
+            if not event_data or event_data == "[DONE]":
+                continue
+            try:
+                event_payload = json.loads(event_data)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+            if isinstance(event_payload, dict):
+                payloads.append(event_payload)
+
+    for payload in payloads:
+        usage = payload.get("usage")
+        if not isinstance(usage, dict):
+            # Responses API wraps usage in the completed response object.
+            # Anthropic message_start events similarly wrap it in "message".
+            for parent_key in ("response", "message"):
+                parent = payload.get(parent_key)
+                if isinstance(parent, dict) and isinstance(parent.get("usage"), dict):
+                    usage = parent["usage"]
+                    break
+        if not isinstance(usage, dict):
+            continue
+
+        prompt_value = usage.get("prompt_tokens")
+        if prompt_value is None:
+            prompt_value = usage.get("input_tokens", 0)
+        completion_value = usage.get("completion_tokens")
+        if completion_value is None:
+            completion_value = usage.get("output_tokens", 0)
+
+        input_details = usage.get("input_tokens_details")
+        if not isinstance(input_details, dict):
+            input_details = usage.get("prompt_tokens_details")
+        cached_input = (
+            _token_count(input_details.get("cached_tokens"))
+            if isinstance(input_details, dict)
+            else 0
+        )
+
+        explicit_cache_read = usage.get("cache_read_input_tokens")
+        if explicit_cache_read is None:
+            explicit_cache_read = usage.get("cache_read_tokens")
+        prompt_total = _token_count(prompt_value)
+        if explicit_cache_read is None:
+            # OpenAI reports cached tokens as a subset of input_tokens. Remove
+            # them from the full-price input count before applying the cache rate.
+            cache_read = cached_input
+            prompt = max(0, prompt_total - cached_input)
+        else:
+            # Providers such as Anthropic report cache reads separately from
+            # input_tokens, so do not subtract them from the prompt count.
+            cache_read = _token_count(explicit_cache_read)
+            prompt = prompt_total
+
+        cache_creation_value = usage.get("cache_creation_input_tokens")
+        if cache_creation_value is None:
+            cache_creation_value = usage.get("cache_creation_tokens", 0)
+
+        output_details = usage.get("output_tokens_details")
+        if not isinstance(output_details, dict):
+            output_details = usage.get("completion_tokens_details")
+        reasoning_value = (
+            output_details.get("reasoning_tokens", 0) if isinstance(output_details, dict) else 0
+        )
+
+        completion = _token_count(completion_value)
+        cache_creation = _token_count(cache_creation_value)
+        reasoning = _token_count(reasoning_value)
+        total_value = usage.get("total_tokens")
+        if isinstance(total_value, (int, float)) and not isinstance(total_value, bool):
+            total = max(0, int(total_value))
+        else:
+            total = prompt + completion + cache_creation + cache_read
+
+        # The last usage-bearing SSE event is authoritative (normally
+        # response.completed); earlier events may contain partial usage.
+        result.update(
+            {
+                "prompt": prompt,
+                "completion": completion,
+                "total": total,
+                "cache_creation_input_tokens": cache_creation,
+                "cache_read_input_tokens": cache_read,
+                "reasoning": reasoning,
+            }
+        )
+
     return result
 
 
