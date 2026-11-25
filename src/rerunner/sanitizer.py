@@ -338,12 +338,22 @@ def sanitize_payload(
         return result
     if isinstance(data, list):
         return [
-            sanitize_payload(item, custom_patterns=custom_patterns, pii_redactor=pii_redactor)
+            sanitize_payload(
+                item,
+                custom_patterns=custom_patterns,
+                pii_redactor=pii_redactor,
+                pseudonymizer=pseudonymizer,
+            )
             for item in data
         ]
     if isinstance(data, tuple):
         return tuple(
-            sanitize_payload(item, custom_patterns=custom_patterns, pii_redactor=pii_redactor)
+            sanitize_payload(
+                item,
+                custom_patterns=custom_patterns,
+                pii_redactor=pii_redactor,
+                pseudonymizer=pseudonymizer,
+            )
             for item in data
         )
     return data
